@@ -161,30 +161,38 @@ export function patchDatalayer(dl) {
 }
 
 /**
- * Patches event listeners added by external libraries to break up long tasks.
- * @param {String[]} types Array of event types to patch, defaults to ['click', 'domcontentloaded']
+ * Patches event listeners added by external libraries to break up long tasks, or any library
+ * matching a given pattern.
+ * @param {String[]} types Array of event types to patch, defaults to ['load', 'domcontentloaded', 'click']
+ * @param {RegEx} pattern A regex pattern for 1st party libraries we want to patch as well
  */
-export function patchEventListeners(types = ['click', 'domcontentloaded']) {
-  const originalAddEventListener = document.addEventListener;
-  document.addEventListener = (...args) => {
-    const [eventName, listener, options] = args;
-    let wrappedListener = listener;
-    if (types.includes(eventName.toLowerCase()) && new Error().stack.split('\n')[2] && !new Error().stack.split('\n')[2].includes(window.location.hostname)) {
-      wrappedListener = (event) => {
-        const { currentTarget, target } = event;
-        splitLongTask().then(() => {
-          Object.defineProperty(event, 'currentTarget', {
-            writable: false,
-            value: currentTarget,
+export function patchEventListeners(types = ['load', 'domcontentloaded', 'click'], pattern) {
+  const handler = {
+    apply: function (target, thisArg, argumentsList) {
+      const [eventName, listener, options] = argumentsList;
+      const src = new Error().stack.split('\n')[2];
+      if (src && types.includes(eventName.toLowerCase())
+          && (!src.includes(window.location.hostname)
+             || (pattern && src.match(pattern)))) {
+        argumentsList[1] = (event) => {
+          const { currentTarget, target } = event;
+          splitLongTask().then(() => {
+            Object.defineProperty(event, 'currentTarget', {
+              writable: false,
+              value: currentTarget,
+            });
+            Object.defineProperty(event, 'target', {
+              writable: false,
+              value: target,
+            });
+            listener(event);
           });
-          Object.defineProperty(event, 'target', {
-            writable: false,
-            value: target,
-          });
-          listener(event);
-        });
+        }
       }
-    }
-    originalAddEventListener(eventName, wrappedListener, options);
-  }
+      return target(...argumentsList);
+    },
+  };
+  
+  window.addEventListener = new Proxy(window.addEventListener, handler);
+  document.addEventListener = new Proxy(document.addEventListener, handler);
 }
