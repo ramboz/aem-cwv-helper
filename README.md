@@ -169,9 +169,9 @@ if (window.dataLayer) {
 }
 ```
 
-### `patchEventListeners(types = ['click', 'domcontentloaded'])`
+### `patchEventListeners(types = ['load', 'domcontentloaded', 'click'], pattern)`
 
-Patches `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `click` and `domcontentloaded`).  If the event listener is likely added by an external library (a martech library likely to bloat the main thread), it wraps the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code.
+Patches `window.addEventListener` and `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `load`, `domcontentloaded` and `click`).  If the event listener is likely added by an external library (a martech library likely to bloat the main thread) or by a 1st party library that matches the specified `pattern`, it proxies the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code.
 
 ```javascript
 import { patchEventListeners } from './aem-cwv-helper.js';
