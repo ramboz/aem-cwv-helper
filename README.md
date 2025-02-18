@@ -41,6 +41,10 @@ async function formatDate(date) {
 callCostlyApi(() => formatDate(new Date()); // Format a date for a given region
 ```
 
+Some good candidates here are:
+- all the `Intl` APIs, especially for data and time formatting
+- the `HTMLElement`'s `outerHTML` property
+
 ### `callCostlyUiApi(fn)`
 
 Executes a function `fn` that performs a costly UI update using `requestAnimationFrame` behind the scene. This ensures that UI updates are synchronized with the browser's rendering pipeline, leading to smoother animations and transitions and preventing jank.
@@ -55,6 +59,11 @@ function updateLargeList() {
 
 callCostlyUiApi(showDialog); // Show a modal dialog
 ```
+
+Some good candidates here are:
+- adding nodes in the DOM
+- changing attributes or properties that trigger animations
+- changing CSS classes on an element
 
 ### `splitLongTask()`
 
@@ -95,6 +104,10 @@ function updateNotificationBadge() {
 performAsyncUiUpdate(updateNotificationBadge); // Update badge after next paint
 ```
 
+Some good candidates here are:
+- UI toast-like notifications
+- showing async content after a spinning wheel or loading animation
+
 ### `readCostlyDomValue(fn)`
 
 An alias for `performAsyncUiUpdate`. Use this function when you need to read a costly DOM value (like `offsetWidth`, `offsetHeight`, etc.) that can potentially cause layout thrashing. Performing these reads asynchronously after the next paint can help mitigate layout thrashing issues.
@@ -104,19 +117,21 @@ import { readCostlyDomValue } from './aem-cwv-helper.js';
 
 async function adjustElementPosition() {
   const element = document.getElementById('my-element');
-  let elementWidth;
-
-  await readCostlyDomValue(() => { // Read width asynchronously
-    elementWidth = element.offsetWidth;
+  await readCostlyDomValue(() => {
+    // Read width asynchronously without causing immediate layout
+    element.style.left = `${element.offsetWidth / 2}px`;
+    console.log(`Element width read and position adjusted.`);
   });
-
-  // Now use elementWidth without causing immediate layout
-  element.style.left = `${elementWidth / 2}px`;
-  console.log(`Element width read and position adjusted.`);
 }
 
 adjustElementPosition();
 ```
+
+This is typically a good method to use when reading or setting [any property that causes layout thrashing](https://gist.github.com/paulirish/5d52fb081b3570c81e3a). Some typical candidates are:
+- accessing `offset*` or `client*` properties on DOM elements
+- accessing any `scroll*` APIs
+- accessing `innerHeight` or `innerWidth`
+- accessing a DOM element's bounding rectangle
 
 ### `splitLongIteration(items, fn, limit = 48)`
 
@@ -139,6 +154,9 @@ async function renderAllProducts() {
 
 renderAllProducts();
 ```
+
+This method is especially interesting if you handle long lists of paginated content.
+This will render them in batches that fit into the specified amount of time (i.e. `limit`)
 
 ### `removeDomNode(el)`
 
