@@ -202,3 +202,48 @@ document.addEventListener('click', () => {
   console.log('Click event listener executed (potentially yielded).');
 });
 ```
+
+### `debounceUiUpdate(fn)`
+
+Creates a debounced version of a UI update function that uses `requestAnimationFrame` to prevent layout thrashing, especially useful in event handlers that are called frequently (like scroll or resize events).
+
+```javascript
+import { debounceUiUpdate } from './aem-cwv-helper.js';
+
+const updatePosition = debounceUiUpdate((event) => {
+  const element = document.getElementById('floating-element');
+  element.style.top = `${event.clientY}px`;
+  element.style.left = `${event.clientX}px`;
+});
+
+// The update will only happen once per animation frame
+document.addEventListener('mousemove', updatePosition);
+```
+
+### `loadDeferredCSS(href)`
+
+Loads a CSS file in a non-blocking way by initially setting it as print-only media and then switching to all media after it's loaded. This helps improve page load performance by deferring non-critical CSS.
+
+```javascript
+import { loadDeferredCSS } from './aem-cwv-helper.js';
+
+// Load non-critical CSS after the page is loaded
+window.addEventListener('load', () => {
+  loadDeferredCSS('/path/to/non-critical.css');
+});
+```
+
+### `prefetchResources(urls)`
+
+Prefetches resources to improve Largest Contentful Paint (LCP) by adding prefetch link tags to the document head.
+Only resources in the critical path that are not immediately discoverable should ever be prefetched.
+
+```javascript
+import { prefetchResources } from './aem-cwv-helper.js';
+
+// Prefetch critical resources
+prefetchResources([
+  '/path/to/hero-image.jpg',
+  '/path/to/critical-font.woff2'
+]);
+```

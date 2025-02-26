@@ -1,3 +1,14 @@
+// See: https://gist.github.com/paulirish/1579671
+let last = 0;
+window.requestAnimationFrame ||= (cb) => {
+  const now = new Date().getTime();
+  const next = Math.max(0, 16 - (now - last));
+  const id = window.setTimeout(() => cb(now + next), next);
+  last = now + next;
+  return id;
+};
+window.cancelAnimationFrame ||= (id) => clearTimeout(id);
+
 // See: https://developer.chrome.com/blog/using-requestidlecallback#checking_for_requestidlecallback
 window.requestIdleCallback ||= (cb) => {
   const start = Date.now();
@@ -47,18 +58,28 @@ export function prioritizeImages(selector) {
 }
 
 // See: https://kurtextrem.de/posts/improve-inp#exit-event-handlers-yieldunlessurgent
+// patched to support `scheduler.yield()`
 export function yieldUnlessUrgent() {
   return new Promise((resolve) => {
     pendingResolvers.add(resolve);
     if (document.visibilityState === 'visible') {
-      document.addEventListener('visibilitychange', resolvePendingPromises);
-      document.addEventListener('pagehide', resolvePendingPromises);
-      window.requestAnimationFrame(() => {
-        window.setTimeout(() => {
-          pendingResolvers.delete(resolve);
-          resolve();
+      const cleanup = () => {
+        document.removeEventListener('visibilitychange', cleanup);
+        document.removeEventListener('pagehide', cleanup);
+        resolvePendingPromises();
+      };
+      document.addEventListener('visibilitychange', cleanup);
+      document.addEventListener('pagehide', cleanup);
+      if (window.scheduler?.yield) {
+        scheduler.yield().then(resolve);
+      } else {
+        window.requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            pendingResolvers.delete(resolve);
+            resolve();
+          });
         });
-      });
+      }
       return;
     }
     // Still here? Resolve immediately.
@@ -127,7 +148,7 @@ export async function splitLongIteration(items, fn, limit = 48) {
   let deadline = performance.now() + limit;
   // eslint-disable-next-line no-restricted-syntax
   for (const item of items) {
-    // ⬇️ 3. Yield when we've crossed the deadline
+    // Yield when we've crossed the deadline
     if (performance.now() >= deadline) {
       // eslint-disable-next-line no-await-in-loop
       await splitLongTask();
@@ -163,17 +184,18 @@ export function patchDatalayer(dl) {
 /**
  * Patches event listeners added by external libraries to break up long tasks, or any library
  * matching a given pattern.
- * @param {String[]} types Array of event types to patch, defaults to ['load', 'domcontentloaded', 'click']
+ * @param {String[]} types Array of event types to patch, defaults to ['load', 'DOMContentLoaded', 'click']
  * @param {RegEx} pattern A regex pattern for 1st party libraries we want to patch as well
  */
-export function patchEventListeners(types = ['load', 'domcontentloaded', 'click'], pattern) {
+export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern) {
+  const lowercaseTypes = types.map((type) => type.toLowerCase());
   const handler = {
     apply: function (target, thisArg, argumentsList) {
-      const [eventName, listener, options] = argumentsList;
+      const [eventName, listener, options = false] = argumentsList;
       const src = new Error().stack.split('\n')[2];
-      if (src && types.includes(eventName.toLowerCase())
+      if (src && lowercaseTypes.includes(eventName.toLowerCase())
           && (!src.includes(window.location.hostname)
-             || (pattern && src.match(pattern)))) {
+             || (pattern && src.match(pattern)))) {
         argumentsList[1] = (event) => {
           const { currentTarget, target } = event;
           splitLongTask().then(() => {
@@ -189,10 +211,60 @@ export function patchEventListeners(types = ['load', 'domcontentloaded', 'click'
           });
         }
       }
-      return target(...argumentsList);
+      return target.call(thisArg, ...argumentsList);
     },
   };
   
   window.addEventListener = new Proxy(window.addEventListener, handler);
   document.addEventListener = new Proxy(document.addEventListener, handler);
+}
+
+/**
+ * Debounces a UI update to prevent layout thrashing in event handlers that are called frequently.
+ * @param {Function} fn The function to call
+ * @returns a functiona promise that resolves when the desired logic was executed
+ */
+export function debounceUiUpdate(fn) {
+  let rafId;
+  return (...args) => {
+    cancelAnimationFrame(rafId);
+    return new Promise((resolve) => {
+      rafId = requestAnimationFrame(() => {
+        resolve(fn(...args));
+      });
+    });
+  };
+}
+
+/**
+ * Loads a CSS file in a way that doesn't block the main thread.
+ * @param {String} href The URL of the CSS file to load
+ * @returns a promise that resolves when the CSS file was loaded
+ */
+export function loadDeferredCSS(href) {
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.media = 'print';
+  link.href = href;
+  return callCostlyApi(() => {
+    document.head.appendChild(link);
+    link.media = 'all';
+  });
+}
+
+/**
+ * Prefetches resources to improve LCP.
+ * @param {String[]} urls The URLs of the resources to prefetch
+ * @returns a promise that resolves when the resources were prefetched
+ */
+export async function prefetchResources(urls) {
+  const link = document.createElement('link');
+  link.rel = 'prefetch';
+  link.href = url;
+  return callCostlyApi(() => {
+    document.head.appendChild(link);
+    return new Promise((resolve) => {
+      link.onload = resolve;
+    });
+  });
 }
