@@ -2,9 +2,27 @@
 
 The library is a lightweight JavaScript library providing helper functions to improve the performance of your web pages and enhance Core Web Vitals (CWV) metrics. It offers utilities to prioritize resources, defer non-urgent tasks, and break up long-running operations, ultimately leading to a smoother and faster user experience.
 
+These helpers implement the principles documented in the [LHS/CWV Performance Runbooks](https://github.com/ramboz/performance-runbooks). Start there to diagnose *which* metric is failing and *why* — the runbooks cover the full range of fixes (many of which need no JavaScript at all) — then reach for the matching helper here when a scheduling or resource-loading primitive is the right tool.
+
 ## Installation
 
 Directly include `aem-cwv-helper.js` in your project.
+
+## Which helper do I use?
+
+The core of the library is a small, opinionated scheduling taxonomy — each name tells you *when* your code will run, so you don't have to remember which browser API to reach for:
+
+| You want to… | Use | Backed by |
+|---|---|---|
+| Break up a long task and let input events run | [`yieldToMain()`](#yieldtomain) | `scheduler.yield()`, with a rAF+timeout fallback |
+| Run deferrable non-UI work (API calls, `Intl` formatting) | [`runWhenIdle(fn)`](#runwhenidlefn) | `requestIdleCallback` |
+| Write to the DOM in sync with the rendering pipeline | [`runBeforePaint(fn)`](#runbeforepaintfn) | `requestAnimationFrame` |
+| Update the UI without competing with the current frame | [`runAfterPaint(fn)`](#runafterpaintfn) | rAF + `setTimeout` (after next paint) |
+| Read a layout-thrashing DOM value (`offsetWidth`, rects…) | [`readAfterPaint(fn)`](#readafterpaintfn) | rAF + `setTimeout` (after next paint) |
+
+> **Deprecated aliases:** the former names `callCostlyApi`, `callCostlyUiApi`, `splitLongTask`, `performAsyncUiUpdate` and `readCostlyDomValue` still work as aliases of `runWhenIdle`, `runBeforePaint`, `yieldToMain`, `runAfterPaint` and `readAfterPaint` respectively, but new code should use the names above.
+
+On top of these primitives, the library ships targeted helpers for common CWV scenarios: `prioritizeImages`, `splitLongIteration`, `removeDomNode`, `debounceUiUpdate`, `loadDeferredCSS`, `prefetchResources`, and last-resort patches for third-party code (`patchDatalayer`, `patchEventListeners`).
 
 ## Usage
 
@@ -24,40 +42,40 @@ prioritizeImages('.banner-image');
 prioritizeImages('img.hero-image, img.featured-product');
 ```
 
-### `callCostlyApi(fn)`
+### `runWhenIdle(fn)`
 
-Executes a function `fn` that performs a costly API call during browser idle time using `requestIdleCallback` behind the scene. This is ideal for non-urgent API requests that can be deferred without impacting the initial page load or user interaction.
+Executes a function `fn` that performs costly non-UI work during browser idle time using `requestIdleCallback` behind the scene. This is ideal for non-urgent API requests that can be deferred without impacting the initial page load or user interaction. *(Formerly `callCostlyApi`.)*
 
 ```javascript
-import { callCostlyApi } from './aem-cwv-helper.js';
+import { runWhenIdle } from './aem-cwv-helper.js';
 
-async function formatDate(date) {
+function formatDate(date) {
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Los_Angeles',
-  }
-  formatter.format(date);
+  });
+  return formatter.format(date);
 }
 
-callCostlyApi(() => formatDate(new Date()); // Format a date for a given region
+runWhenIdle(() => formatDate(new Date())); // Format a date for a given region
 ```
 
 Some good candidates here are:
 - all the `Intl` APIs, especially for data and time formatting
 - the `HTMLElement`'s `outerHTML` property
 
-### `callCostlyUiApi(fn)`
+### `runBeforePaint(fn)`
 
-Executes a function `fn` that performs a costly UI update using `requestAnimationFrame` behind the scene. This ensures that UI updates are synchronized with the browser's rendering pipeline, leading to smoother animations and transitions and preventing jank.
+Executes a function `fn` that performs a costly UI update using `requestAnimationFrame` behind the scene. This ensures that UI updates are synchronized with the browser's rendering pipeline, leading to smoother animations and transitions and preventing jank. *(Formerly `callCostlyUiApi`.)*
 
 ```javascript
-import { callCostlyUiApi } from './aem-cwv-helper.js';
+import { runBeforePaint } from './aem-cwv-helper.js';
 
-function updateLargeList() {
+function showDialog() {
   const dialog = document.getElementById('modal-dialog');
   dialog.showModal();
 }
 
-callCostlyUiApi(showDialog); // Show a modal dialog
+runBeforePaint(showDialog); // Show a modal dialog
 ```
 
 Some good candidates here are:
@@ -65,12 +83,12 @@ Some good candidates here are:
 - changing attributes or properties that trigger animations
 - changing CSS classes on an element
 
-### `splitLongTask()`
+### `yieldToMain()`
 
-Breaks up the current task and yields to the main thread, while still guaranteeing the rest of the logic will eventually run. Use this function to explicitly yield to the main thread within long-running tasks, making your application more responsive.
+Breaks up the current task and yields to the main thread, while still guaranteeing the rest of the logic will eventually run. Use this function to explicitly yield to the main thread within long-running tasks, making your application more responsive. *(Formerly `splitLongTask`.)*
 
 ```javascript
-import { splitLongTask } from './aem-cwv-helper.js';
+import { yieldToMain } from './aem-cwv-helper.js';
 
 async function processData() {
   const data = [...Array(10000).keys()]; // Example large dataset
@@ -78,7 +96,7 @@ async function processData() {
   for (const item of data) {
     // ... process each item ...
     if (item % 1000 === 0) {
-      await splitLongTask(); // Yield every 1000 items
+      await yieldToMain(); // Yield every 1000 items
       console.log(`Processed ${item} items, yielding...`);
     }
   }
@@ -88,12 +106,12 @@ async function processData() {
 processData();
 ```
 
-### `performAsyncUiUpdate(fn)`
+### `runAfterPaint(fn)`
 
-Executes a function `fn` after the next browser animation frame. This is useful for performing UI updates that should happen soon after the current paint cycle is complete, ensuring visual consistency, but are not urgent enough that they need to run immediately.
+Executes a function `fn` after the next browser animation frame. This is useful for performing UI updates that should happen soon after the current paint cycle is complete, ensuring visual consistency, but are not urgent enough that they need to run immediately. *(Formerly `performAsyncUiUpdate`.)*
 
 ```javascript
-import { performAsyncUiUpdate } from './aem-cwv-helper.js';
+import { runAfterPaint } from './aem-cwv-helper.js';
 
 function updateNotificationBadge() {
   const badge = document.getElementById('notification-badge');
@@ -101,27 +119,26 @@ function updateNotificationBadge() {
   console.log('Notification badge updated.');
 }
 
-performAsyncUiUpdate(updateNotificationBadge); // Update badge after next paint
+runAfterPaint(updateNotificationBadge); // Update badge after next paint
 ```
 
 Some good candidates here are:
 - UI toast-like notifications
 - showing async content after a spinning wheel or loading animation
 
-### `readCostlyDomValue(fn)`
+### `readAfterPaint(fn)`
 
-An alias for `performAsyncUiUpdate`. Use this function when you need to read a costly DOM value (like `offsetWidth`, `offsetHeight`, etc.) that can potentially cause layout thrashing. Performing these reads asynchronously after the next paint can help mitigate layout thrashing issues.
+An alias for `runAfterPaint`, named for intent. Use this function when you need to read a costly DOM value (like `offsetWidth`, `offsetHeight`, etc.) that can potentially cause layout thrashing. Performing these reads asynchronously after the next paint can help mitigate layout thrashing issues. Keep writes out of the callback: read here, then write in a separate step. *(Formerly `readCostlyDomValue`.)*
 
 ```javascript
-import { readCostlyDomValue } from './aem-cwv-helper.js';
+import { readAfterPaint } from './aem-cwv-helper.js';
 
 async function adjustElementPosition() {
   const element = document.getElementById('my-element');
-  await readCostlyDomValue(() => {
-    // Read width asynchronously without causing immediate layout
-    element.style.left = `${element.offsetWidth / 2}px`;
-    console.log(`Element width read and position adjusted.`);
-  });
+  // Read the width asynchronously without causing immediate layout…
+  const width = await readAfterPaint(() => element.offsetWidth);
+  // …then write in a separate step, so reads and writes are not interleaved
+  element.style.left = `${width / 2}px`;
 }
 
 adjustElementPosition();
@@ -172,37 +189,6 @@ removeDomNode(elementToRemove).then(() => {
 });
 ```
 
-### `patchDatalayer(dl)`
-
-Patches the `push` method of a data layer object (typically `window.dataLayer`) to automatically break up long tasks triggered by dataLayer events. This is useful for improving performance when using tag managers and data layers that might push events that trigger heavy processing.
-
-```javascript
-import { patchDatalayer } from './aem-cwv-helper.js';
-
-if (window.dataLayer) {
-  patchDatalayer(window.dataLayer);
-
-  // Now, any dataLayer.push calls will automatically yield to the main thread
-  window.dataLayer.push({ event: 'userInteraction', action: 'click' });
-}
-```
-
-### `patchEventListeners(types = ['load', 'domcontentloaded', 'click'], pattern)`
-
-Patches `window.addEventListener` and `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `load`, `domcontentloaded` and `click`).  If the event listener is likely added by an external library (a martech library likely to bloat the main thread) or by a 1st party library that matches the specified `pattern`, it proxies the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code.
-
-```javascript
-import { patchEventListeners } from './aem-cwv-helper.js';
-
-patchEventListeners(); // Patch 'click' and 'domcontentloaded' event listeners (default)
-// or
-patchEventListeners(['click', 'touchstart', 'scroll']); // Patch specific event types
-
-document.addEventListener('click', () => {
-  console.log('Click event listener executed (potentially yielded).');
-});
-```
-
 ### `debounceUiUpdate(fn)`
 
 Creates a debounced version of a UI update function that uses `requestAnimationFrame` to prevent layout thrashing, especially useful in event handlers that are called frequently (like scroll or resize events).
@@ -247,3 +233,47 @@ prefetchResources([
   '/path/to/critical-font.woff2'
 ]);
 ```
+
+## Last-resort patches for third-party code
+
+The helpers above are safe, local primitives you apply to your own code. The two patches below instead **monkey-patch global browser APIs** to tame third-party scripts you don't control. They can genuinely rescue INP/TBT on martech-heavy pages, but they change the runtime behavior of code you don't own — treat them as a last resort after you've exhausted deferral, consent gating, and facades (see your tag-management options first), and verify their impact in the lab before shipping.
+
+### `patchDatalayer(dl)`
+
+Patches the `push` method of a data layer object (typically `window.dataLayer`) to automatically break up long tasks triggered by dataLayer events. This is useful for improving performance when using tag managers and data layers that might push events that trigger heavy processing. Deferred pushes are flushed in FIFO order, and the patch survives a tag manager (e.g. GTM) later replacing `push` with its own implementation.
+
+```javascript
+import { patchDatalayer } from './aem-cwv-helper.js';
+
+if (window.dataLayer) {
+  patchDatalayer(window.dataLayer);
+
+  // Now, any dataLayer.push calls will automatically yield to the main thread
+  window.dataLayer.push({ event: 'userInteraction', action: 'click' });
+}
+```
+
+**Caveats:**
+- pushes become asynchronous: code that reads the data layer synchronously right after a push will not see the event yet
+- the return value of `push` is no longer forwarded
+
+### `patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern)`
+
+Patches `window.addEventListener` and `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `load`, `DOMContentLoaded` and `click`). If the event listener is likely added by an external library (a martech library likely to bloat the main thread) or by a 1st party library that matches the specified `pattern`, it proxies the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code. `removeEventListener` is patched alongside, so removing an original listener also removes its deferred wrapper.
+
+```javascript
+import { patchEventListeners } from './aem-cwv-helper.js';
+
+patchEventListeners(); // Patch 'load', 'DOMContentLoaded' and 'click' event listeners (default)
+// or
+patchEventListeners(['click', 'touchstart', 'scroll']); // Patch specific event types
+
+document.addEventListener('click', () => {
+  console.log('Click event listener executed (potentially yielded).');
+});
+```
+
+**Caveats:**
+- a deferred listener runs **after** the event's default action: calling `event.preventDefault()` from it is a no-op (the library logs a console warning when this happens); don't patch event types whose listeners are expected to cancel the default action
+- only listeners registered on `window` and `document` are patched; listeners added directly on elements are untouched
+- third-party detection relies on `Error.prototype.stack` attribution: listeners that can't be attributed to a source (e.g. when everything is bundled into a single first-party file) are left untouched, and first-party code served from a different domain (e.g. a CDN) may be misclassified as third-party

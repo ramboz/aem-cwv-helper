@@ -45,7 +45,7 @@ function resolvePendingPromises() {
 }
 
 /**
- * Prioritizes the loaing of critical images to reduce the LCP duration.
+ * Prioritizes the loading of critical images to reduce the LCP duration.
  * @param {String} selector The CSS selector for the images that needed to be prioritized
  */
 export function prioritizeImages(selector) {
@@ -53,7 +53,7 @@ export function prioritizeImages(selector) {
     img.setAttribute('loading', 'eager');
     img.setAttribute('fetchpriority', 'high');
     img.loading = 'eager';
-    img.fetchpriority = 'high';
+    img.fetchPriority = 'high';
   });
 }
 
@@ -88,54 +88,88 @@ export function yieldUnlessUrgent() {
 }
 
 /**
- * Performs a costly API call that isn't urgent.
+ * Runs a costly function that isn't urgent during browser idle time
+ * (via `requestIdleCallback`). Use for deferrable non-UI work: expensive
+ * API calls, `Intl` formatting, serialization, analytics bookkeeping.
  * @param {Function} fn the logic to execute
  * @returns a promise that resolves when the function was executed
  */
-export async function callCostlyApi(fn) {
+export async function runWhenIdle(fn) {
   return new Promise((resolve) => {
     window.requestIdleCallback(() => {
       resolve(fn());
-    });  
+    });
   });
 }
 
 /**
- * Performs a costly UI update on that isn't urgent.
+ * Runs a UI update right before the next paint (via `requestAnimationFrame`).
+ * Use for DOM writes that should be synchronized with the rendering pipeline:
+ * adding nodes, toggling classes, changing animated properties.
  * @param {Function} fn the logic to execute
  * @returns a promise that resolves when the function was executed
  */
-export async function callCostlyUiApi(fn) {
+export async function runBeforePaint(fn) {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => {
       resolve(fn());
-    });  
+    });
   });
 }
 
 /**
- * A method that yields to the main thread, so you can break up long tasks.
+ * Yields to the main thread, so you can break up long tasks and let
+ * pending input events run.
  * @returns a promise that resolves when the task can safely resume
  */
-export async function splitLongTask() {
+export async function yieldToMain() {
   return yieldUnlessUrgent();
 }
 
 /**
- * Performs an async UI update that isn't urgent.
+ * Runs a non-urgent UI update after the next paint. Use for updates that
+ * should not compete with the current frame: toasts, badges, revealing
+ * async content.
  * @param {Function} fn The logic to execute
  * @returns a promise that resolves when the function was executed
  */
-export async function performAsyncUiUpdate(fn) {
+export async function runAfterPaint(fn) {
   return afterNextPaint(() => fn());
 }
 
 /**
- * Reads a costly DOM value that typically causes layout thrashing.
+ * Reads a costly DOM value (offsets, client rects, scroll positions…) after
+ * the next paint, to limit layout thrashing. Keep writes out of the callback:
+ * read here, then write in a separate step.
  * @param {Function} fn The logic to execute
- * @returns a promise that resolves when the function was executed
+ * @returns a promise that resolves with the value read
  */
-export const readCostlyDomValue = performAsyncUiUpdate;
+export const readAfterPaint = runAfterPaint;
+
+/**
+ * @deprecated Use {@link runWhenIdle} instead.
+ */
+export const callCostlyApi = runWhenIdle;
+
+/**
+ * @deprecated Use {@link runBeforePaint} instead.
+ */
+export const callCostlyUiApi = runBeforePaint;
+
+/**
+ * @deprecated Use {@link yieldToMain} instead.
+ */
+export const splitLongTask = yieldToMain;
+
+/**
+ * @deprecated Use {@link runAfterPaint} instead.
+ */
+export const performAsyncUiUpdate = runAfterPaint;
+
+/**
+ * @deprecated Use {@link readAfterPaint} instead.
+ */
+export const readCostlyDomValue = readAfterPaint;
 
 /**
  * Iterates over an array of items and applies the given function while making sure to yield to the
@@ -151,7 +185,7 @@ export async function splitLongIteration(items, fn, limit = 48) {
     // Yield when we've crossed the deadline
     if (performance.now() >= deadline) {
       // eslint-disable-next-line no-await-in-loop
-      await splitLongTask();
+      await yieldToMain();
       deadline = performance.now() + limit; // update deadline
     }
     fn(item);
@@ -165,74 +199,162 @@ export async function splitLongIteration(items, fn, limit = 48) {
  */
 export async function removeDomNode(el) {
   el.style.display = 'none';
-  return callCostlyApi(() => el.remove());
+  return runWhenIdle(() => el.remove());
 }
 
 /**
  * Patches the data layer push methods to break up long tasks.
+ * Deferred pushes are flushed in FIFO order, and the patch survives a tag
+ * manager (e.g. GTM) later replacing `push` with its own implementation.
  * @param {Object} dl The data layer object, typically `window.dataLayer`
  */
 export function patchDatalayer(dl) {
-  const originalDataLayerPush = dl.push;
-  dl.push = (...args) => {
-    splitLongTask().then(() => {
-      originalDataLayerPush(...args);
-    });
+  // Bind the receiver: before a tag manager loads, `dl.push` is `Array.prototype.push`
+  // and calling it unbound throws.
+  let originalDataLayerPush = dl.push.bind(dl);
+  // Serialize deferred pushes so events keep their original order.
+  let queue = Promise.resolve();
+  const deferredPush = (...args) => {
+    queue = queue
+      .then(() => yieldToMain())
+      .then(() => originalDataLayerPush(...args));
   };
+  // Tag managers replace `dataLayer.push` when they load; capture the
+  // replacement instead of letting it overwrite the patch.
+  Object.defineProperty(dl, 'push', {
+    configurable: true,
+    get: () => deferredPush,
+    set: (newPush) => {
+      originalDataLayerPush = newPush.bind(dl);
+    },
+  });
+}
+
+// Maps an original listener to its deferred wrappers, keyed by `type:capture`,
+// so removeEventListener keeps working on patched listeners.
+const patchedListeners = new WeakMap();
+
+// Returns the first stack frame that doesn't belong to this module, or null
+// when the caller can't be attributed (in which case we must not patch).
+function getListenerSource() {
+  const { stack } = new Error();
+  if (!stack) {
+    return null;
+  }
+  const selfUrl = import.meta.url;
+  let selfPath;
+  try {
+    selfPath = new URL(selfUrl).pathname;
+  } catch (e) {
+    selfPath = selfUrl;
+  }
+  const frames = stack.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('at ') || line.includes('@'));
+  return frames.find((line) => !line.includes(selfUrl) && !line.includes(selfPath)) || null;
+}
+
+function getCaptureFlag(options) {
+  return typeof options === 'boolean' ? options : !!(options && options.capture);
 }
 
 /**
  * Patches event listeners added by external libraries to break up long tasks, or any library
- * matching a given pattern.
+ * matching a given pattern. `removeEventListener` is patched alongside, so removing an
+ * original listener also removes its deferred wrapper.
+ *
+ * Caveats — this is a last-resort patch:
+ * - deferred listeners run after the default action: a late `preventDefault()` is a no-op
+ *   (a console warning is emitted when that happens)
+ * - only listeners registered on `window` and `document` are patched, not element listeners
+ * - caller attribution relies on `Error.prototype.stack`: when a listener can't be attributed
+ *   (e.g. everything is bundled into a single file), it is left untouched
  * @param {String[]} types Array of event types to patch, defaults to ['load', 'DOMContentLoaded', 'click']
- * @param {RegEx} pattern A regex pattern for 1st party libraries we want to patch as well
+ * @param {RegExp} pattern A regex pattern for 1st party libraries we want to patch as well
  */
 export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern) {
   const lowercaseTypes = types.map((type) => type.toLowerCase());
-  const handler = {
+  const addHandler = {
     apply: function (target, thisArg, argumentsList) {
       const [eventName, listener, options = false] = argumentsList;
-      const src = new Error().stack.split('\n')[2];
-      if (src && lowercaseTypes.includes(eventName.toLowerCase())
+      const src = getListenerSource();
+      if (src && typeof listener === 'function'
+          && lowercaseTypes.includes(String(eventName).toLowerCase())
           && (!src.includes(window.location.hostname)
              || (pattern && src.match(pattern)))) {
-        argumentsList[1] = (event) => {
-          const { currentTarget, target } = event;
-          splitLongTask().then(() => {
+        const wrapper = (event) => {
+          const { currentTarget, target: eventTarget } = event;
+          yieldToMain().then(() => {
             Object.defineProperty(event, 'currentTarget', {
               writable: false,
               value: currentTarget,
             });
             Object.defineProperty(event, 'target', {
               writable: false,
-              value: target,
+              value: eventTarget,
             });
-            listener(event);
+            const originalPreventDefault = event.preventDefault.bind(event);
+            event.preventDefault = () => {
+              // eslint-disable-next-line no-console
+              console.warn('[aem-cwv-helper] preventDefault() called from a deferred listener: the default action has already run.');
+              originalPreventDefault();
+            };
+            listener.call(currentTarget, event);
           });
+        };
+        let wrappersByKey = patchedListeners.get(listener);
+        if (!wrappersByKey) {
+          wrappersByKey = new Map();
+          patchedListeners.set(listener, wrappersByKey);
         }
+        wrappersByKey.set(`${eventName}:${getCaptureFlag(options)}`, wrapper);
+        argumentsList[1] = wrapper;
       }
       return target.call(thisArg, ...argumentsList);
     },
   };
-  
-  window.addEventListener = new Proxy(window.addEventListener, handler);
-  document.addEventListener = new Proxy(document.addEventListener, handler);
+  const removeHandler = {
+    apply: function (target, thisArg, argumentsList) {
+      const [eventName, listener, options = false] = argumentsList;
+      const wrapper = patchedListeners.get(listener)?.get(`${eventName}:${getCaptureFlag(options)}`);
+      if (wrapper) {
+        argumentsList[1] = wrapper;
+      }
+      return target.call(thisArg, ...argumentsList);
+    },
+  };
+
+  window.addEventListener = new Proxy(window.addEventListener, addHandler);
+  document.addEventListener = new Proxy(document.addEventListener, addHandler);
+  window.removeEventListener = new Proxy(window.removeEventListener, removeHandler);
+  document.removeEventListener = new Proxy(document.removeEventListener, removeHandler);
 }
 
 /**
  * Debounces a UI update to prevent layout thrashing in event handlers that are called frequently.
  * @param {Function} fn The function to call
- * @returns a functiona promise that resolves when the desired logic was executed
+ * @returns {Function} a debounced function returning a promise that resolves once the update ran.
+ *          Superseded calls settle with the result of the call that actually executed.
  */
 export function debounceUiUpdate(fn) {
   let rafId;
+  let supersededResolve;
   return (...args) => {
     cancelAnimationFrame(rafId);
-    return new Promise((resolve) => {
-      rafId = requestAnimationFrame(() => {
-        resolve(fn(...args));
-      });
+    let resolveCurrent;
+    const promise = new Promise((resolve) => {
+      resolveCurrent = resolve;
     });
+    rafId = requestAnimationFrame(() => {
+      supersededResolve = null;
+      resolveCurrent(fn(...args));
+    });
+    // Don't leak pending promises: a superseded call adopts the latest call's result.
+    if (supersededResolve) {
+      supersededResolve(promise);
+    }
+    supersededResolve = resolveCurrent;
+    return promise;
   };
 }
 
@@ -246,10 +368,16 @@ export function loadDeferredCSS(href) {
   link.rel = 'stylesheet';
   link.media = 'print';
   link.href = href;
-  return callCostlyApi(() => {
+  return runWhenIdle(() => new Promise((resolve) => {
+    // Only switch to `all` once the file is loaded, so the stylesheet
+    // never becomes render-blocking.
+    link.onload = () => {
+      link.media = 'all';
+      resolve();
+    };
+    link.onerror = resolve;
     document.head.appendChild(link);
-    link.media = 'all';
-  });
+  }));
 }
 
 /**
@@ -258,13 +386,12 @@ export function loadDeferredCSS(href) {
  * @returns a promise that resolves when the resources were prefetched
  */
 export async function prefetchResources(urls) {
-  const link = document.createElement('link');
-  link.rel = 'prefetch';
-  link.href = url;
-  return callCostlyApi(() => {
+  return runWhenIdle(() => Promise.all(urls.map((url) => new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'prefetch';
+    link.href = url;
+    link.onload = resolve;
+    link.onerror = resolve;
     document.head.appendChild(link);
-    return new Promise((resolve) => {
-      link.onload = resolve;
-    });
-  });
+  }))));
 }

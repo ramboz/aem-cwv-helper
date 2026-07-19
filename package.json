@@ -1,0 +1,39 @@
+{
+  "name": "aem-cwv-helper",
+  "version": "0.1.0",
+  "description": "Lightweight helpers to improve Core Web Vitals: prioritize resources, defer non-urgent work, and break up long tasks.",
+  "type": "module",
+  "main": "aem-cwv-helper.js",
+  "exports": {
+    ".": {
+      "types": "./aem-cwv-helper.d.ts",
+      "default": "./aem-cwv-helper.js"
+    }
+  },
+  "types": "aem-cwv-helper.d.ts",
+  "files": [
+    "aem-cwv-helper.js",
+    "aem-cwv-helper.d.ts"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramboz/aem-cwv-helper.git"
+  },
+  "keywords": [
+    "core-web-vitals",
+    "cwv",
+    "performance",
+    "lcp",
+    "inp",
+    "cls",
+    "aem"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "jsdom": "^26.0.0",
+    "vitest": "^3.0.0"
+  }
+}
