@@ -1,6 +1,6 @@
 {
   "name": "aem-cwv-helper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lightweight helpers to improve Core Web Vitals: prioritize resources, defer non-urgent work, and break up long tasks.",
   "type": "module",
   "main": "aem-cwv-helper.js",

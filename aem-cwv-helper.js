@@ -395,3 +395,288 @@ export async function prefetchResources(urls) {
     document.head.appendChild(link);
   }))));
 }
+
+/**
+ * Builds a short, human-readable CSS selector for an element (diagnostics only).
+ */
+function getSelector(el) {
+  if (!el || !el.tagName) {
+    return null;
+  }
+  if (el.id) {
+    return `#${el.id}`;
+  }
+  const tag = el.tagName.toLowerCase();
+  const classes = typeof el.className === 'string' && el.className.trim()
+    ? `.${el.className.trim().split(/\s+/).slice(0, 2).join('.')}`
+    : '';
+  const parent = el.parentElement?.tagName ? `${el.parentElement.tagName.toLowerCase()} > ` : '';
+  return `${parent}${tag}${classes}`;
+}
+
+// True once the element has generated at least one layout box, i.e. it has
+// been (or is about to be) painted.
+function isRendered(el) {
+  return el.getClientRects().length > 0;
+}
+
+// Warns when a space-reservation helper runs after first contentful paint on an
+// element that is already rendered: at that point the reservation itself causes
+// the layout shift it is meant to prevent. Elements that are still hidden (e.g.
+// sections gated until decoration) don't warn — reserving their space is still safe.
+function warnIfReservedTooLate(helper, el) {
+  const [fcp] = performance.getEntriesByName?.('first-contentful-paint') || [];
+  if (fcp && isRendered(el)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[aem-cwv-helper] ${helper}() ran ${Math.round(performance.now() - fcp.startTime)}ms after first contentful paint on an already-rendered element (${getSelector(el)}): the reservation itself now causes the shift it is meant to prevent. Reserve the space in CSS instead, or call this before the content is first rendered.`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Reserves vertical space for content that loads asynchronously (banners, ads,
+ * third-party widgets), so its arrival doesn't shift the elements below it.
+ * Prefer a static CSS min-height when the value is known ahead of time; use
+ * this helper when the reservation is only known at runtime. Must run before
+ * the container is first painted — a warning is logged otherwise.
+ * @param {String} selector The CSS selector for the containers to reserve
+ * @param {Number|String} minHeight The height to reserve (px number, or any CSS length)
+ */
+export function reserveSpace(selector, minHeight) {
+  const value = typeof minHeight === 'number' ? `${minHeight}px` : minHeight;
+  document.querySelectorAll(selector).forEach((el) => {
+    warnIfReservedTooLate('reserveSpace', el);
+    el.style.setProperty('min-height', value);
+  });
+}
+
+/**
+ * Gives unsized media (images, videos, iframes) an aspect-ratio so the browser
+ * reserves their space before they load. Sizing sources, in order: existing
+ * width/height attributes, a data-aspect-ratio attribute (e.g. "16 / 9"), the
+ * defaultAspectRatio option, or — for already-loaded images — their natural
+ * dimensions. Elements whose ratio can't be determined are returned (and
+ * reported) so you can size them explicitly.
+ * @param {Element|Document} root The root to scan, defaults to document
+ * @param {Object} options
+ * @param {String} options.defaultAspectRatio Fallback ratio (e.g. '16 / 9')
+ * @returns {Element[]} the media elements that could not be stabilized
+ */
+export function stabilizeMedia(root = document, { defaultAspectRatio } = {}) {
+  const unresolved = [];
+  root.querySelectorAll('img, video, iframe').forEach((el) => {
+    const computed = window.getComputedStyle(el).aspectRatio;
+    if (computed && computed !== 'auto') {
+      return; // already sized via CSS
+    }
+    const width = el.getAttribute('width');
+    const height = el.getAttribute('height');
+    const isLoadedImage = el.tagName === 'IMG' && el.complete && el.naturalWidth > 0;
+    let ratio = null;
+    if (width && height) {
+      ratio = `${width} / ${height}`;
+    } else if (el.dataset.aspectRatio) {
+      ratio = el.dataset.aspectRatio;
+    } else if (isLoadedImage) {
+      ratio = `${el.naturalWidth} / ${el.naturalHeight}`;
+    } else if (defaultAspectRatio) {
+      ratio = defaultAspectRatio;
+    }
+    if (ratio) {
+      // A loaded image already occupies its final box; applying its own ratio is shift-free.
+      if (!isLoadedImage) {
+        warnIfReservedTooLate('stabilizeMedia', el);
+      }
+      el.style.setProperty('aspect-ratio', ratio);
+    } else {
+      unresolved.push(el);
+    }
+  });
+  if (unresolved.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[aem-cwv-helper] stabilizeMedia() could not determine an aspect ratio for ${unresolved.length} element(s); size them via width/height attributes, data-aspect-ratio, or CSS.`, unresolved);
+  }
+  return unresolved;
+}
+
+/**
+ * Reveals a hidden element without shifting the layout around it. The element
+ * must already occupy its final space (or be out of the normal flow, e.g.
+ * position fixed/absolute): the helper toggles a class that should animate
+ * compositor-only properties (opacity, transform). It warns when the element is
+ * display:none and in the normal flow, because revealing it would shift its siblings.
+ * @param {DOMElement} el The element to reveal
+ * @param {String} revealClass The class to add, defaults to 'is-visible'
+ * @returns a promise that resolves when the class was applied
+ */
+export async function revealWithoutShift(el, revealClass = 'is-visible') {
+  const { display, position } = window.getComputedStyle(el);
+  if (display === 'none' && !['fixed', 'absolute'].includes(position)) {
+    // eslint-disable-next-line no-console
+    console.warn('[aem-cwv-helper] revealWithoutShift(): the element is display:none and in the normal flow, so revealing it will shift its siblings. Reserve its space (or take it out of the flow) and animate only opacity/transform.');
+  }
+  return runBeforePaint(() => el.classList.add(revealClass));
+}
+
+// Timestamp of the most recent discrete user input; layout shifts within 500ms
+// of one are excluded from CLS (hadRecentInput).
+const DISCRETE_INPUT_EVENTS = ['pointerdown', 'keydown'];
+const CLS_INPUT_GRACE = 500;
+let lastDiscreteInput = 0;
+let discreteInputTracked = false;
+
+function trackDiscreteInput() {
+  if (discreteInputTracked) {
+    return;
+  }
+  discreteInputTracked = true;
+  DISCRETE_INPUT_EVENTS.forEach((type) => {
+    window.addEventListener(type, () => {
+      lastDiscreteInput = performance.now();
+    }, { capture: true, passive: true });
+  });
+}
+
+/**
+ * Runs a layout-shifting DOM update (typically inserting late content like
+ * banners or recommendations) inside the 500ms grace window that follows a
+ * discrete user input, where layout shifts are excluded from CLS. Falls back to
+ * running after `timeout` milliseconds if the user never interacts.
+ * @param {Function} fn The DOM update to run
+ * @param {Object} options
+ * @param {Number} options.timeout Max time to wait for an interaction, defaults to 4000ms
+ * @returns a promise that resolves with the function result
+ */
+export function insertAfterInteraction(fn, { timeout = 4000 } = {}) {
+  trackDiscreteInput();
+  return new Promise((resolve) => {
+    if (lastDiscreteInput && performance.now() - lastDiscreteInput < CLS_INPUT_GRACE) {
+      resolve(runBeforePaint(fn));
+      return;
+    }
+    let timeoutId;
+    const run = () => {
+      window.clearTimeout(timeoutId);
+      DISCRETE_INPUT_EVENTS.forEach((type) => window.removeEventListener(type, run, true));
+      resolve(runBeforePaint(fn));
+    };
+    DISCRETE_INPUT_EVENTS.forEach((type) => window.addEventListener(type, run, { capture: true, passive: true }));
+    timeoutId = window.setTimeout(run, timeout);
+  });
+}
+
+/**
+ * Runs a DOM update inside a View Transition when the browser supports it:
+ * shifts that happen inside a view transition are animated smoothly and don't
+ * count as unexpected layout shifts. Falls back to running the update on the
+ * next frame otherwise.
+ * @param {Function} fn The DOM update to run
+ * @returns a promise that resolves with the function result once the transition finished
+ */
+export async function updateWithViewTransition(fn) {
+  if (typeof document.startViewTransition !== 'function') {
+    return runBeforePaint(fn);
+  }
+  let result;
+  const transition = document.startViewTransition(() => {
+    result = fn();
+    return result;
+  });
+  await transition.finished;
+  return result;
+}
+
+// Creates a PerformanceObserver for the given entry type, or returns null when
+// the browser doesn't support it.
+function observeEntries(type, options, handle) {
+  const Observer = window.PerformanceObserver;
+  if (typeof Observer !== 'function' || !(Observer.supportedEntryTypes || []).includes(type)) {
+    return null;
+  }
+  try {
+    const observer = new Observer((list) => list.getEntries().forEach(handle));
+    observer.observe({ type, buffered: true, ...options });
+    return observer;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Observes layout shifts and reports each shift's score and the elements that
+ * moved, flagging the likely culprit: the first source whose box changed size.
+ * Bigger sources that merely moved are usually victims pushed by it, not the cause.
+ * @param {Function} callback Called with { value, culprit, sources, entry }
+ * @param {Object} options
+ * @param {Boolean} options.includeRecentInput Also report input-excluded shifts, defaults to false
+ * @returns {PerformanceObserver} the observer (call disconnect() to stop), or null if unsupported
+ */
+export function observeLayoutShifts(callback, { includeRecentInput = false } = {}) {
+  return observeEntries('layout-shift', {}, (entry) => {
+    if (entry.hadRecentInput && !includeRecentInput) {
+      return;
+    }
+    const sources = (entry.sources || []).map((source) => ({
+      node: source.node,
+      selector: getSelector(source.node),
+      previousRect: source.previousRect,
+      currentRect: source.currentRect,
+      resized: source.previousRect.width !== source.currentRect.width
+        || source.previousRect.height !== source.currentRect.height,
+    }));
+    callback({
+      value: entry.value,
+      culprit: sources.find((source) => source.resized) || sources[0] || null,
+      sources,
+      entry,
+    });
+  });
+}
+
+/**
+ * Observes Largest Contentful Paint candidates as the browser upgrades them,
+ * reporting the element, its selector, url, size and render time. The last
+ * reported candidate is the page's LCP element.
+ * @param {Function} callback Called with { element, selector, url, size, startTime, entry }
+ * @returns {PerformanceObserver} the observer (call disconnect() to stop), or null if unsupported
+ */
+export function observeLcpCandidates(callback) {
+  return observeEntries('largest-contentful-paint', {}, (entry) => {
+    callback({
+      element: entry.element || null,
+      selector: getSelector(entry.element),
+      url: entry.url || null,
+      size: entry.size,
+      startTime: entry.startTime,
+      entry,
+    });
+  });
+}
+
+/**
+ * Observes slow interactions (the events INP is computed from), reporting the
+ * target and the input-delay / processing / presentation-delay breakdown that
+ * tells you which phase to fix.
+ * @param {Function} callback Called with { target, selector, type, duration, inputDelay, processingTime, presentationDelay, entry }
+ * @param {Object} options
+ * @param {Number} options.durationThreshold Minimum duration to report in ms, defaults to 200
+ * @returns {PerformanceObserver} the observer (call disconnect() to stop), or null if unsupported
+ */
+export function observeSlowInteractions(callback, { durationThreshold = 200 } = {}) {
+  return observeEntries('event', { durationThreshold }, (entry) => {
+    if (!entry.interactionId) {
+      return;
+    }
+    callback({
+      target: entry.target || null,
+      selector: getSelector(entry.target),
+      type: entry.name,
+      duration: entry.duration,
+      inputDelay: entry.processingStart - entry.startTime,
+      processingTime: entry.processingEnd - entry.processingStart,
+      presentationDelay: entry.duration - (entry.processingEnd - entry.startTime),
+      entry,
+    });
+  });
+}

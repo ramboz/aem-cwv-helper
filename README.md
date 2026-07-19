@@ -22,7 +22,7 @@ The core of the library is a small, opinionated scheduling taxonomy — each nam
 
 > **Deprecated aliases:** the former names `callCostlyApi`, `callCostlyUiApi`, `splitLongTask`, `performAsyncUiUpdate` and `readCostlyDomValue` still work as aliases of `runWhenIdle`, `runBeforePaint`, `yieldToMain`, `runAfterPaint` and `readAfterPaint` respectively, but new code should use the names above.
 
-On top of these primitives, the library ships targeted helpers for common CWV scenarios: `prioritizeImages`, `splitLongIteration`, `removeDomNode`, `debounceUiUpdate`, `loadDeferredCSS`, `prefetchResources`, and last-resort patches for third-party code (`patchDatalayer`, `patchEventListeners`).
+On top of these primitives, the library ships targeted helpers for common CWV scenarios: `prioritizeImages`, `splitLongIteration`, `removeDomNode`, `debounceUiUpdate`, `loadDeferredCSS`, `prefetchResources`, [layout-stability helpers](#layout-stability-cls-helpers) (`reserveSpace`, `stabilizeMedia`, `revealWithoutShift`, `insertAfterInteraction`, `updateWithViewTransition`), [diagnostics](#diagnostics) for CLS/LCP/INP attribution (`observeLayoutShifts`, `observeLcpCandidates`, `observeSlowInteractions`), and last-resort patches for third-party code (`patchDatalayer`, `patchEventListeners`).
 
 ## Usage
 
@@ -277,3 +277,112 @@ document.addEventListener('click', () => {
 - a deferred listener runs **after** the event's default action: calling `event.preventDefault()` from it is a no-op (the library logs a console warning when this happens); don't patch event types whose listeners are expected to cancel the default action
 - only listeners registered on `window` and `document` are patched; listeners added directly on elements are untouched
 - third-party detection relies on `Error.prototype.stack` attribution: listeners that can't be attributed to a source (e.g. when everything is bundled into a single first-party file) are left untouched, and first-party code served from a different domain (e.g. a CDN) may be misclassified as third-party
+
+## Layout-stability (CLS) helpers
+
+> **CSS first:** most CLS fixes need no JavaScript at all — `width`/`height` attributes on media, static `min-height` reservations, `aspect-ratio`, `scrollbar-gutter: stable`, size-adjusted font fallbacks. See the [layout stability runbook](https://github.com/ramboz/performance-runbooks/blob/main/use-cases/layout-stability.md) for those. The helpers below cover the cases where the fix genuinely lives in JavaScript.
+
+### `reserveSpace(selector, minHeight)`
+
+Reserves vertical space for content that loads asynchronously (banners, ads, third-party widgets), so its arrival doesn't shift the elements below it. Use it when the reservation value is only known at runtime — otherwise prefer a static CSS `min-height`.
+
+```javascript
+import { reserveSpace } from './aem-cwv-helper.js';
+
+// Reserve the ad slot's rendered height before the vendor script fills it
+reserveSpace('.ad-slot', 250);
+reserveSpace('.reviews-widget-host', 'clamp(320px, 40vh, 376px)');
+```
+
+> ⚠️ **Must run before the container is first painted.** A reservation that lands after first paint *causes* the shift it's meant to prevent. The helper checks the buffered `first-contentful-paint` entry and logs a warning when it's called too late on an already-rendered element. (Containers that are still hidden — e.g. sections gated until decoration — don't warn: reserving their space is still safe.)
+
+### `stabilizeMedia(root = document, { defaultAspectRatio })`
+
+Gives unsized media (images, videos, iframes) an `aspect-ratio` so the browser reserves their space before they load. Sizing sources, in order: existing `width`/`height` attributes, a `data-aspect-ratio` attribute, the `defaultAspectRatio` option, or — for already-loaded images — their natural dimensions. Elements whose ratio can't be determined are returned (and reported in a console warning) so you can size them explicitly. The same too-late-after-FCP warning as `reserveSpace` applies.
+
+```javascript
+import { stabilizeMedia } from './aem-cwv-helper.js';
+
+// Stabilize all media in a block before it is revealed
+const unresolved = stabilizeMedia(document.querySelector('.hero'), { defaultAspectRatio: '16 / 9' });
+```
+
+### `revealWithoutShift(el, revealClass = 'is-visible')`
+
+Reveals a hidden element (consent banner, tab panel, menu) without shifting the layout around it. The element must already occupy its final space, or be out of the normal flow (`position: fixed/absolute`); the helper toggles a class that should animate only compositor properties (`opacity`, `transform`), and warns when the element is `display: none` in the normal flow — because revealing it would then shift its siblings.
+
+```css
+.cookie-banner { opacity: 0; transform: translateY(8px); transition: opacity 200ms, transform 200ms; }
+.cookie-banner.is-visible { opacity: 1; transform: none; }
+```
+
+```javascript
+import { revealWithoutShift } from './aem-cwv-helper.js';
+
+revealWithoutShift(document.querySelector('.cookie-banner'));
+```
+
+### `insertAfterInteraction(fn, { timeout = 4000 })`
+
+Runs a layout-shifting DOM update — typically inserting late content like banners or recommendation rails — inside the 500ms grace window that follows a discrete user input (click, tap, keypress), where layout shifts are excluded from CLS (`hadRecentInput`). Falls back to running after `timeout` milliseconds if the user never interacts.
+
+```javascript
+import { insertAfterInteraction } from './aem-cwv-helper.js';
+
+insertAfterInteraction(() => {
+  main.append(buildRecommendationsRail());
+});
+```
+
+### `updateWithViewTransition(fn)`
+
+Runs a DOM update inside a [View Transition](https://developer.chrome.com/docs/web-platform/view-transitions) when the browser supports it: shifts that happen inside a view transition are animated smoothly and don't count as unexpected layout shifts. Falls back to running the update on the next frame otherwise.
+
+```javascript
+import { updateWithViewTransition } from './aem-cwv-helper.js';
+
+updateWithViewTransition(() => {
+  list.replaceChildren(...renderFilteredItems(filter));
+});
+```
+
+## Diagnostics
+
+Lightweight `PerformanceObserver` wrappers for lab debugging: they surface *which element* is responsible for a metric and *why*, in the shape the [runbooks](https://github.com/ramboz/performance-runbooks) ask you to capture before fixing anything. For proper field metric values, use the [web-vitals attribution build](https://github.com/GoogleChrome/web-vitals#attribution) instead. Each returns the observer (call `disconnect()` to stop), or `null` when unsupported.
+
+### `observeLayoutShifts(callback, { includeRecentInput = false })`
+
+Reports each layout shift's score and the elements that moved — flagging the likely **culprit** (the first source whose box changed *size*). Bigger sources that merely moved position are usually victims pushed by the culprit, not the cause; this encodes the runbooks' "amplifier is not the cause" diagnostic trap.
+
+```javascript
+import { observeLayoutShifts } from './aem-cwv-helper.js';
+
+observeLayoutShifts(({ value, culprit, sources }) => {
+  console.log(`CLS +${value.toFixed(4)} — likely cause: ${culprit?.selector}`, sources);
+});
+```
+
+### `observeLcpCandidates(callback)`
+
+Reports each Largest Contentful Paint candidate as the browser upgrades them — element, selector, url, size and render time. The last reported candidate is the page's LCP element.
+
+```javascript
+import { observeLcpCandidates } from './aem-cwv-helper.js';
+
+observeLcpCandidates(({ selector, url, startTime }) => {
+  console.log(`LCP candidate at ${Math.round(startTime)}ms: ${selector}`, url);
+});
+```
+
+### `observeSlowInteractions(callback, { durationThreshold = 200 })`
+
+Reports slow interactions (the events INP is computed from) with the breakdown that tells you which phase to fix: `inputDelay` (main thread was busy — break up long tasks), `processingTime` (your handlers are slow — yield or defer), `presentationDelay` (rendering after the handlers is slow).
+
+```javascript
+import { observeSlowInteractions } from './aem-cwv-helper.js';
+
+observeSlowInteractions(({ selector, type, duration, inputDelay, processingTime, presentationDelay }) => {
+  console.log(`Slow ${type} on ${selector}: ${Math.round(duration)}ms`,
+    { inputDelay, processingTime, presentationDelay });
+});
+```
