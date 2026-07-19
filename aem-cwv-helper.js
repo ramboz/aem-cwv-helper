@@ -45,7 +45,7 @@ function resolvePendingPromises() {
 }
 
 /**
- * Prioritizes the loaing of critical images to reduce the LCP duration.
+ * Prioritizes the loading of critical images to reduce the LCP duration.
  * @param {String} selector The CSS selector for the images that needed to be prioritized
  */
 export function prioritizeImages(selector) {
@@ -53,7 +53,7 @@ export function prioritizeImages(selector) {
     img.setAttribute('loading', 'eager');
     img.setAttribute('fetchpriority', 'high');
     img.loading = 'eager';
-    img.fetchpriority = 'high';
+    img.fetchPriority = 'high';
   });
 }
 
@@ -173,7 +173,9 @@ export async function removeDomNode(el) {
  * @param {Object} dl The data layer object, typically `window.dataLayer`
  */
 export function patchDatalayer(dl) {
-  const originalDataLayerPush = dl.push;
+  // Bind the receiver: before a tag manager loads, `dl.push` is `Array.prototype.push`
+  // and calling it unbound throws.
+  const originalDataLayerPush = dl.push.bind(dl);
   dl.push = (...args) => {
     splitLongTask().then(() => {
       originalDataLayerPush(...args);
@@ -185,7 +187,7 @@ export function patchDatalayer(dl) {
  * Patches event listeners added by external libraries to break up long tasks, or any library
  * matching a given pattern.
  * @param {String[]} types Array of event types to patch, defaults to ['load', 'DOMContentLoaded', 'click']
- * @param {RegEx} pattern A regex pattern for 1st party libraries we want to patch as well
+ * @param {RegExp} pattern A regex pattern for 1st party libraries we want to patch as well
  */
 export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern) {
   const lowercaseTypes = types.map((type) => type.toLowerCase());
@@ -222,17 +224,28 @@ export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'
 /**
  * Debounces a UI update to prevent layout thrashing in event handlers that are called frequently.
  * @param {Function} fn The function to call
- * @returns a functiona promise that resolves when the desired logic was executed
+ * @returns {Function} a debounced function returning a promise that resolves once the update ran.
+ *          Superseded calls settle with the result of the call that actually executed.
  */
 export function debounceUiUpdate(fn) {
   let rafId;
+  let supersededResolve;
   return (...args) => {
     cancelAnimationFrame(rafId);
-    return new Promise((resolve) => {
-      rafId = requestAnimationFrame(() => {
-        resolve(fn(...args));
-      });
+    let resolveCurrent;
+    const promise = new Promise((resolve) => {
+      resolveCurrent = resolve;
     });
+    rafId = requestAnimationFrame(() => {
+      supersededResolve = null;
+      resolveCurrent(fn(...args));
+    });
+    // Don't leak pending promises: a superseded call adopts the latest call's result.
+    if (supersededResolve) {
+      supersededResolve(promise);
+    }
+    supersededResolve = resolveCurrent;
+    return promise;
   };
 }
 
@@ -246,10 +259,16 @@ export function loadDeferredCSS(href) {
   link.rel = 'stylesheet';
   link.media = 'print';
   link.href = href;
-  return callCostlyApi(() => {
+  return callCostlyApi(() => new Promise((resolve) => {
+    // Only switch to `all` once the file is loaded, so the stylesheet
+    // never becomes render-blocking.
+    link.onload = () => {
+      link.media = 'all';
+      resolve();
+    };
+    link.onerror = resolve;
     document.head.appendChild(link);
-    link.media = 'all';
-  });
+  }));
 }
 
 /**
@@ -258,13 +277,12 @@ export function loadDeferredCSS(href) {
  * @returns a promise that resolves when the resources were prefetched
  */
 export async function prefetchResources(urls) {
-  const link = document.createElement('link');
-  link.rel = 'prefetch';
-  link.href = url;
-  return callCostlyApi(() => {
+  return callCostlyApi(() => Promise.all(urls.map((url) => new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'prefetch';
+    link.href = url;
+    link.onload = resolve;
+    link.onerror = resolve;
     document.head.appendChild(link);
-    return new Promise((resolve) => {
-      link.onload = resolve;
-    });
-  });
+  }))));
 }

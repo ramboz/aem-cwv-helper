@@ -31,14 +31,14 @@ Executes a function `fn` that performs a costly API call during browser idle tim
 ```javascript
 import { callCostlyApi } from './aem-cwv-helper.js';
 
-async function formatDate(date) {
+function formatDate(date) {
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Los_Angeles',
-  }
-  formatter.format(date);
+  });
+  return formatter.format(date);
 }
 
-callCostlyApi(() => formatDate(new Date()); // Format a date for a given region
+callCostlyApi(() => formatDate(new Date())); // Format a date for a given region
 ```
 
 Some good candidates here are:
@@ -52,7 +52,7 @@ Executes a function `fn` that performs a costly UI update using `requestAnimatio
 ```javascript
 import { callCostlyUiApi } from './aem-cwv-helper.js';
 
-function updateLargeList() {
+function showDialog() {
   const dialog = document.getElementById('modal-dialog');
   dialog.showModal();
 }
@@ -117,11 +117,10 @@ import { readCostlyDomValue } from './aem-cwv-helper.js';
 
 async function adjustElementPosition() {
   const element = document.getElementById('my-element');
-  await readCostlyDomValue(() => {
-    // Read width asynchronously without causing immediate layout
-    element.style.left = `${element.offsetWidth / 2}px`;
-    console.log(`Element width read and position adjusted.`);
-  });
+  // Read the width asynchronously without causing immediate layout…
+  const width = await readCostlyDomValue(() => element.offsetWidth);
+  // …then write in a separate step, so reads and writes are not interleaved
+  element.style.left = `${width / 2}px`;
 }
 
 adjustElementPosition();
