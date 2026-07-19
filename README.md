@@ -6,6 +6,22 @@ The library is a lightweight JavaScript library providing helper functions to im
 
 Directly include `aem-cwv-helper.js` in your project.
 
+## Which helper do I use?
+
+The core of the library is a small, opinionated scheduling taxonomy — each name tells you *when* your code will run, so you don't have to remember which browser API to reach for:
+
+| You want to… | Use | Backed by |
+|---|---|---|
+| Break up a long task and let input events run | [`yieldToMain()`](#yieldtomain) | `scheduler.yield()`, with a rAF+timeout fallback |
+| Run deferrable non-UI work (API calls, `Intl` formatting) | [`runWhenIdle(fn)`](#runwhenidlefn) | `requestIdleCallback` |
+| Write to the DOM in sync with the rendering pipeline | [`runBeforePaint(fn)`](#runbeforepaintfn) | `requestAnimationFrame` |
+| Update the UI without competing with the current frame | [`runAfterPaint(fn)`](#runafterpaintfn) | rAF + `setTimeout` (after next paint) |
+| Read a layout-thrashing DOM value (`offsetWidth`, rects…) | [`readAfterPaint(fn)`](#readafterpaintfn) | rAF + `setTimeout` (after next paint) |
+
+> **Deprecated aliases:** the former names `callCostlyApi`, `callCostlyUiApi`, `splitLongTask`, `performAsyncUiUpdate` and `readCostlyDomValue` still work as aliases of `runWhenIdle`, `runBeforePaint`, `yieldToMain`, `runAfterPaint` and `readAfterPaint` respectively, but new code should use the names above.
+
+On top of these primitives, the library ships targeted helpers for common CWV scenarios: `prioritizeImages`, `splitLongIteration`, `removeDomNode`, `debounceUiUpdate`, `loadDeferredCSS`, `prefetchResources`, and last-resort patches for third-party code (`patchDatalayer`, `patchEventListeners`).
+
 ## Usage
 
 This library provides several functions to optimize different aspects of your web page's performance. Here's a breakdown of each function and how to use them:
@@ -24,12 +40,12 @@ prioritizeImages('.banner-image');
 prioritizeImages('img.hero-image, img.featured-product');
 ```
 
-### `callCostlyApi(fn)`
+### `runWhenIdle(fn)`
 
-Executes a function `fn` that performs a costly API call during browser idle time using `requestIdleCallback` behind the scene. This is ideal for non-urgent API requests that can be deferred without impacting the initial page load or user interaction.
+Executes a function `fn` that performs costly non-UI work during browser idle time using `requestIdleCallback` behind the scene. This is ideal for non-urgent API requests that can be deferred without impacting the initial page load or user interaction. *(Formerly `callCostlyApi`.)*
 
 ```javascript
-import { callCostlyApi } from './aem-cwv-helper.js';
+import { runWhenIdle } from './aem-cwv-helper.js';
 
 function formatDate(date) {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -38,26 +54,26 @@ function formatDate(date) {
   return formatter.format(date);
 }
 
-callCostlyApi(() => formatDate(new Date())); // Format a date for a given region
+runWhenIdle(() => formatDate(new Date())); // Format a date for a given region
 ```
 
 Some good candidates here are:
 - all the `Intl` APIs, especially for data and time formatting
 - the `HTMLElement`'s `outerHTML` property
 
-### `callCostlyUiApi(fn)`
+### `runBeforePaint(fn)`
 
-Executes a function `fn` that performs a costly UI update using `requestAnimationFrame` behind the scene. This ensures that UI updates are synchronized with the browser's rendering pipeline, leading to smoother animations and transitions and preventing jank.
+Executes a function `fn` that performs a costly UI update using `requestAnimationFrame` behind the scene. This ensures that UI updates are synchronized with the browser's rendering pipeline, leading to smoother animations and transitions and preventing jank. *(Formerly `callCostlyUiApi`.)*
 
 ```javascript
-import { callCostlyUiApi } from './aem-cwv-helper.js';
+import { runBeforePaint } from './aem-cwv-helper.js';
 
 function showDialog() {
   const dialog = document.getElementById('modal-dialog');
   dialog.showModal();
 }
 
-callCostlyUiApi(showDialog); // Show a modal dialog
+runBeforePaint(showDialog); // Show a modal dialog
 ```
 
 Some good candidates here are:
@@ -65,12 +81,12 @@ Some good candidates here are:
 - changing attributes or properties that trigger animations
 - changing CSS classes on an element
 
-### `splitLongTask()`
+### `yieldToMain()`
 
-Breaks up the current task and yields to the main thread, while still guaranteeing the rest of the logic will eventually run. Use this function to explicitly yield to the main thread within long-running tasks, making your application more responsive.
+Breaks up the current task and yields to the main thread, while still guaranteeing the rest of the logic will eventually run. Use this function to explicitly yield to the main thread within long-running tasks, making your application more responsive. *(Formerly `splitLongTask`.)*
 
 ```javascript
-import { splitLongTask } from './aem-cwv-helper.js';
+import { yieldToMain } from './aem-cwv-helper.js';
 
 async function processData() {
   const data = [...Array(10000).keys()]; // Example large dataset
@@ -78,7 +94,7 @@ async function processData() {
   for (const item of data) {
     // ... process each item ...
     if (item % 1000 === 0) {
-      await splitLongTask(); // Yield every 1000 items
+      await yieldToMain(); // Yield every 1000 items
       console.log(`Processed ${item} items, yielding...`);
     }
   }
@@ -88,12 +104,12 @@ async function processData() {
 processData();
 ```
 
-### `performAsyncUiUpdate(fn)`
+### `runAfterPaint(fn)`
 
-Executes a function `fn` after the next browser animation frame. This is useful for performing UI updates that should happen soon after the current paint cycle is complete, ensuring visual consistency, but are not urgent enough that they need to run immediately.
+Executes a function `fn` after the next browser animation frame. This is useful for performing UI updates that should happen soon after the current paint cycle is complete, ensuring visual consistency, but are not urgent enough that they need to run immediately. *(Formerly `performAsyncUiUpdate`.)*
 
 ```javascript
-import { performAsyncUiUpdate } from './aem-cwv-helper.js';
+import { runAfterPaint } from './aem-cwv-helper.js';
 
 function updateNotificationBadge() {
   const badge = document.getElementById('notification-badge');
@@ -101,24 +117,24 @@ function updateNotificationBadge() {
   console.log('Notification badge updated.');
 }
 
-performAsyncUiUpdate(updateNotificationBadge); // Update badge after next paint
+runAfterPaint(updateNotificationBadge); // Update badge after next paint
 ```
 
 Some good candidates here are:
 - UI toast-like notifications
 - showing async content after a spinning wheel or loading animation
 
-### `readCostlyDomValue(fn)`
+### `readAfterPaint(fn)`
 
-An alias for `performAsyncUiUpdate`. Use this function when you need to read a costly DOM value (like `offsetWidth`, `offsetHeight`, etc.) that can potentially cause layout thrashing. Performing these reads asynchronously after the next paint can help mitigate layout thrashing issues.
+An alias for `runAfterPaint`, named for intent. Use this function when you need to read a costly DOM value (like `offsetWidth`, `offsetHeight`, etc.) that can potentially cause layout thrashing. Performing these reads asynchronously after the next paint can help mitigate layout thrashing issues. Keep writes out of the callback: read here, then write in a separate step. *(Formerly `readCostlyDomValue`.)*
 
 ```javascript
-import { readCostlyDomValue } from './aem-cwv-helper.js';
+import { readAfterPaint } from './aem-cwv-helper.js';
 
 async function adjustElementPosition() {
   const element = document.getElementById('my-element');
   // Read the width asynchronously without causing immediate layout…
-  const width = await readCostlyDomValue(() => element.offsetWidth);
+  const width = await readAfterPaint(() => element.offsetWidth);
   // …then write in a separate step, so reads and writes are not interleaved
   element.style.left = `${width / 2}px`;
 }

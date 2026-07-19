@@ -9,19 +9,34 @@ export function prioritizeImages(selector: string): void;
 export function yieldUnlessUrgent(): Promise<void>;
 
 /** Runs a costly, non-urgent function during browser idle time. */
-export function callCostlyApi<T>(fn: () => T | Promise<T>): Promise<T>;
+export function runWhenIdle<T>(fn: () => T | Promise<T>): Promise<T>;
 
 /** Runs a costly UI update on the next animation frame. */
-export function callCostlyUiApi<T>(fn: () => T | Promise<T>): Promise<T>;
+export function runBeforePaint<T>(fn: () => T | Promise<T>): Promise<T>;
 
 /** Yields to the main thread so long tasks can be broken up. */
-export function splitLongTask(): Promise<void>;
+export function yieldToMain(): Promise<void>;
 
 /** Runs a non-urgent UI update after the next paint. */
-export function performAsyncUiUpdate<T>(fn: () => T | Promise<T>): Promise<T>;
+export function runAfterPaint<T>(fn: () => T | Promise<T>): Promise<T>;
 
 /** Reads a costly DOM value after the next paint to limit layout thrashing. */
-export const readCostlyDomValue: typeof performAsyncUiUpdate;
+export const readAfterPaint: typeof runAfterPaint;
+
+/** @deprecated Use {@link runWhenIdle} instead. */
+export const callCostlyApi: typeof runWhenIdle;
+
+/** @deprecated Use {@link runBeforePaint} instead. */
+export const callCostlyUiApi: typeof runBeforePaint;
+
+/** @deprecated Use {@link yieldToMain} instead. */
+export const splitLongTask: typeof yieldToMain;
+
+/** @deprecated Use {@link runAfterPaint} instead. */
+export const performAsyncUiUpdate: typeof runAfterPaint;
+
+/** @deprecated Use {@link readAfterPaint} instead. */
+export const readCostlyDomValue: typeof readAfterPaint;
 
 /**
  * Iterates over items, yielding to the main thread whenever the time

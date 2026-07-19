@@ -4,6 +4,11 @@ import {
 import {
   prioritizeImages,
   yieldUnlessUrgent,
+  runWhenIdle,
+  runBeforePaint,
+  yieldToMain,
+  runAfterPaint,
+  readAfterPaint,
   callCostlyApi,
   callCostlyUiApi,
   splitLongTask,
@@ -41,38 +46,48 @@ describe('prioritizeImages', () => {
   });
 });
 
-describe('yieldUnlessUrgent / splitLongTask', () => {
+describe('yieldUnlessUrgent / yieldToMain', () => {
   it('resolves', async () => {
     await expect(yieldUnlessUrgent()).resolves.toBeUndefined();
-    await expect(splitLongTask()).resolves.toBeUndefined();
+    await expect(yieldToMain()).resolves.toBeUndefined();
   });
 });
 
-describe('callCostlyApi', () => {
+describe('runWhenIdle', () => {
   it('resolves with the function result', async () => {
-    await expect(callCostlyApi(() => 42)).resolves.toBe(42);
+    await expect(runWhenIdle(() => 42)).resolves.toBe(42);
   });
 
   it('unwraps promise results', async () => {
-    await expect(callCostlyApi(async () => 'done')).resolves.toBe('done');
+    await expect(runWhenIdle(async () => 'done')).resolves.toBe('done');
   });
 });
 
-describe('callCostlyUiApi', () => {
+describe('runBeforePaint', () => {
   it('resolves with the function result on the next frame', async () => {
-    await expect(callCostlyUiApi(() => 'painted')).resolves.toBe('painted');
+    await expect(runBeforePaint(() => 'painted')).resolves.toBe('painted');
   });
 });
 
-describe('performAsyncUiUpdate / readCostlyDomValue', () => {
+describe('runAfterPaint / readAfterPaint', () => {
   it('resolves with the function result after the next paint', async () => {
-    await expect(performAsyncUiUpdate(() => 'updated')).resolves.toBe('updated');
+    await expect(runAfterPaint(() => 'updated')).resolves.toBe('updated');
   });
 
-  it('readCostlyDomValue returns the read value', async () => {
+  it('readAfterPaint returns the read value', async () => {
     document.body.innerHTML = '<div id="el"></div>';
     const el = document.getElementById('el');
-    await expect(readCostlyDomValue(() => el.tagName)).resolves.toBe('DIV');
+    await expect(readAfterPaint(() => el.tagName)).resolves.toBe('DIV');
+  });
+});
+
+describe('deprecated aliases', () => {
+  it('still point to the canonical implementations', () => {
+    expect(callCostlyApi).toBe(runWhenIdle);
+    expect(callCostlyUiApi).toBe(runBeforePaint);
+    expect(splitLongTask).toBe(yieldToMain);
+    expect(performAsyncUiUpdate).toBe(runAfterPaint);
+    expect(readCostlyDomValue).toBe(readAfterPaint);
   });
 });
 
