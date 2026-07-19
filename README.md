@@ -2,6 +2,8 @@
 
 The library is a lightweight JavaScript library providing helper functions to improve the performance of your web pages and enhance Core Web Vitals (CWV) metrics. It offers utilities to prioritize resources, defer non-urgent tasks, and break up long-running operations, ultimately leading to a smoother and faster user experience.
 
+These helpers implement the principles documented in the [LHS/CWV Performance Runbooks](https://github.com/ramboz/performance-runbooks). Start there to diagnose *which* metric is failing and *why* — the runbooks cover the full range of fixes (many of which need no JavaScript at all) — then reach for the matching helper here when a scheduling or resource-loading primitive is the right tool.
+
 ## Installation
 
 Directly include `aem-cwv-helper.js` in your project.
