@@ -204,36 +204,86 @@ export async function removeDomNode(el) {
 
 /**
  * Patches the data layer push methods to break up long tasks.
+ * Deferred pushes are flushed in FIFO order, and the patch survives a tag
+ * manager (e.g. GTM) later replacing `push` with its own implementation.
  * @param {Object} dl The data layer object, typically `window.dataLayer`
  */
 export function patchDatalayer(dl) {
   // Bind the receiver: before a tag manager loads, `dl.push` is `Array.prototype.push`
   // and calling it unbound throws.
-  const originalDataLayerPush = dl.push.bind(dl);
-  dl.push = (...args) => {
-    yieldToMain().then(() => {
-      originalDataLayerPush(...args);
-    });
+  let originalDataLayerPush = dl.push.bind(dl);
+  // Serialize deferred pushes so events keep their original order.
+  let queue = Promise.resolve();
+  const deferredPush = (...args) => {
+    queue = queue
+      .then(() => yieldToMain())
+      .then(() => originalDataLayerPush(...args));
   };
+  // Tag managers replace `dataLayer.push` when they load; capture the
+  // replacement instead of letting it overwrite the patch.
+  Object.defineProperty(dl, 'push', {
+    configurable: true,
+    get: () => deferredPush,
+    set: (newPush) => {
+      originalDataLayerPush = newPush.bind(dl);
+    },
+  });
+}
+
+// Maps an original listener to its deferred wrappers, keyed by `type:capture`,
+// so removeEventListener keeps working on patched listeners.
+const patchedListeners = new WeakMap();
+
+// Returns the first stack frame that doesn't belong to this module, or null
+// when the caller can't be attributed (in which case we must not patch).
+function getListenerSource() {
+  const { stack } = new Error();
+  if (!stack) {
+    return null;
+  }
+  const selfUrl = import.meta.url;
+  let selfPath;
+  try {
+    selfPath = new URL(selfUrl).pathname;
+  } catch (e) {
+    selfPath = selfUrl;
+  }
+  const frames = stack.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('at ') || line.includes('@'));
+  return frames.find((line) => !line.includes(selfUrl) && !line.includes(selfPath)) || null;
+}
+
+function getCaptureFlag(options) {
+  return typeof options === 'boolean' ? options : !!(options && options.capture);
 }
 
 /**
  * Patches event listeners added by external libraries to break up long tasks, or any library
- * matching a given pattern.
+ * matching a given pattern. `removeEventListener` is patched alongside, so removing an
+ * original listener also removes its deferred wrapper.
+ *
+ * Caveats — this is a last-resort patch:
+ * - deferred listeners run after the default action: a late `preventDefault()` is a no-op
+ *   (a console warning is emitted when that happens)
+ * - only listeners registered on `window` and `document` are patched, not element listeners
+ * - caller attribution relies on `Error.prototype.stack`: when a listener can't be attributed
+ *   (e.g. everything is bundled into a single file), it is left untouched
  * @param {String[]} types Array of event types to patch, defaults to ['load', 'DOMContentLoaded', 'click']
  * @param {RegExp} pattern A regex pattern for 1st party libraries we want to patch as well
  */
 export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern) {
   const lowercaseTypes = types.map((type) => type.toLowerCase());
-  const handler = {
+  const addHandler = {
     apply: function (target, thisArg, argumentsList) {
       const [eventName, listener, options = false] = argumentsList;
-      const src = new Error().stack.split('\n')[2];
-      if (src && lowercaseTypes.includes(eventName.toLowerCase())
+      const src = getListenerSource();
+      if (src && typeof listener === 'function'
+          && lowercaseTypes.includes(String(eventName).toLowerCase())
           && (!src.includes(window.location.hostname)
              || (pattern && src.match(pattern)))) {
-        argumentsList[1] = (event) => {
-          const { currentTarget, target } = event;
+        const wrapper = (event) => {
+          const { currentTarget, target: eventTarget } = event;
           yieldToMain().then(() => {
             Object.defineProperty(event, 'currentTarget', {
               writable: false,
@@ -241,18 +291,43 @@ export function patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'
             });
             Object.defineProperty(event, 'target', {
               writable: false,
-              value: target,
+              value: eventTarget,
             });
-            listener(event);
+            const originalPreventDefault = event.preventDefault.bind(event);
+            event.preventDefault = () => {
+              // eslint-disable-next-line no-console
+              console.warn('[aem-cwv-helper] preventDefault() called from a deferred listener: the default action has already run.');
+              originalPreventDefault();
+            };
+            listener.call(currentTarget, event);
           });
+        };
+        let wrappersByKey = patchedListeners.get(listener);
+        if (!wrappersByKey) {
+          wrappersByKey = new Map();
+          patchedListeners.set(listener, wrappersByKey);
         }
+        wrappersByKey.set(`${eventName}:${getCaptureFlag(options)}`, wrapper);
+        argumentsList[1] = wrapper;
       }
       return target.call(thisArg, ...argumentsList);
     },
   };
-  
-  window.addEventListener = new Proxy(window.addEventListener, handler);
-  document.addEventListener = new Proxy(document.addEventListener, handler);
+  const removeHandler = {
+    apply: function (target, thisArg, argumentsList) {
+      const [eventName, listener, options = false] = argumentsList;
+      const wrapper = patchedListeners.get(listener)?.get(`${eventName}:${getCaptureFlag(options)}`);
+      if (wrapper) {
+        argumentsList[1] = wrapper;
+      }
+      return target.call(thisArg, ...argumentsList);
+    },
+  };
+
+  window.addEventListener = new Proxy(window.addEventListener, addHandler);
+  document.addEventListener = new Proxy(document.addEventListener, addHandler);
+  window.removeEventListener = new Proxy(window.removeEventListener, removeHandler);
+  document.removeEventListener = new Proxy(document.removeEventListener, removeHandler);
 }
 
 /**

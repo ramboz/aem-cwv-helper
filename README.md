@@ -187,37 +187,6 @@ removeDomNode(elementToRemove).then(() => {
 });
 ```
 
-### `patchDatalayer(dl)`
-
-Patches the `push` method of a data layer object (typically `window.dataLayer`) to automatically break up long tasks triggered by dataLayer events. This is useful for improving performance when using tag managers and data layers that might push events that trigger heavy processing.
-
-```javascript
-import { patchDatalayer } from './aem-cwv-helper.js';
-
-if (window.dataLayer) {
-  patchDatalayer(window.dataLayer);
-
-  // Now, any dataLayer.push calls will automatically yield to the main thread
-  window.dataLayer.push({ event: 'userInteraction', action: 'click' });
-}
-```
-
-### `patchEventListeners(types = ['load', 'domcontentloaded', 'click'], pattern)`
-
-Patches `window.addEventListener` and `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `load`, `domcontentloaded` and `click`).  If the event listener is likely added by an external library (a martech library likely to bloat the main thread) or by a 1st party library that matches the specified `pattern`, it proxies the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code.
-
-```javascript
-import { patchEventListeners } from './aem-cwv-helper.js';
-
-patchEventListeners(); // Patch 'click' and 'domcontentloaded' event listeners (default)
-// or
-patchEventListeners(['click', 'touchstart', 'scroll']); // Patch specific event types
-
-document.addEventListener('click', () => {
-  console.log('Click event listener executed (potentially yielded).');
-});
-```
-
 ### `debounceUiUpdate(fn)`
 
 Creates a debounced version of a UI update function that uses `requestAnimationFrame` to prevent layout thrashing, especially useful in event handlers that are called frequently (like scroll or resize events).
@@ -262,3 +231,47 @@ prefetchResources([
   '/path/to/critical-font.woff2'
 ]);
 ```
+
+## Last-resort patches for third-party code
+
+The helpers above are safe, local primitives you apply to your own code. The two patches below instead **monkey-patch global browser APIs** to tame third-party scripts you don't control. They can genuinely rescue INP/TBT on martech-heavy pages, but they change the runtime behavior of code you don't own — treat them as a last resort after you've exhausted deferral, consent gating, and facades (see your tag-management options first), and verify their impact in the lab before shipping.
+
+### `patchDatalayer(dl)`
+
+Patches the `push` method of a data layer object (typically `window.dataLayer`) to automatically break up long tasks triggered by dataLayer events. This is useful for improving performance when using tag managers and data layers that might push events that trigger heavy processing. Deferred pushes are flushed in FIFO order, and the patch survives a tag manager (e.g. GTM) later replacing `push` with its own implementation.
+
+```javascript
+import { patchDatalayer } from './aem-cwv-helper.js';
+
+if (window.dataLayer) {
+  patchDatalayer(window.dataLayer);
+
+  // Now, any dataLayer.push calls will automatically yield to the main thread
+  window.dataLayer.push({ event: 'userInteraction', action: 'click' });
+}
+```
+
+**Caveats:**
+- pushes become asynchronous: code that reads the data layer synchronously right after a push will not see the event yet
+- the return value of `push` is no longer forwarded
+
+### `patchEventListeners(types = ['load', 'DOMContentLoaded', 'click'], pattern)`
+
+Patches `window.addEventListener` and `document.addEventListener` to wrap event listeners for specified event `types` (defaults to `load`, `DOMContentLoaded` and `click`). If the event listener is likely added by an external library (a martech library likely to bloat the main thread) or by a 1st party library that matches the specified `pattern`, it proxies the listener to yield to the main thread before executing the original listener. This helps to break up long tasks triggered by event handlers, especially from third-party scripts, so you can prioritize UI updates from your project code. `removeEventListener` is patched alongside, so removing an original listener also removes its deferred wrapper.
+
+```javascript
+import { patchEventListeners } from './aem-cwv-helper.js';
+
+patchEventListeners(); // Patch 'load', 'DOMContentLoaded' and 'click' event listeners (default)
+// or
+patchEventListeners(['click', 'touchstart', 'scroll']); // Patch specific event types
+
+document.addEventListener('click', () => {
+  console.log('Click event listener executed (potentially yielded).');
+});
+```
+
+**Caveats:**
+- a deferred listener runs **after** the event's default action: calling `event.preventDefault()` from it is a no-op (the library logs a console warning when this happens); don't patch event types whose listeners are expected to cancel the default action
+- only listeners registered on `window` and `document` are patched; listeners added directly on elements are untouched
+- third-party detection relies on `Error.prototype.stack` attribution: listeners that can't be attributed to a source (e.g. when everything is bundled into a single first-party file) are left untouched, and first-party code served from a different domain (e.g. a CDN) may be misclassified as third-party

@@ -17,6 +17,7 @@ import {
   splitLongIteration,
   removeDomNode,
   patchDatalayer,
+  patchEventListeners,
   debounceUiUpdate,
   loadDeferredCSS,
   prefetchResources,
@@ -190,5 +191,80 @@ describe('prefetchResources', () => {
     expect(links.map((l) => l.getAttribute('href'))).toEqual(urls);
     links.forEach((link) => link.dispatchEvent(new Event('load')));
     await expect(promise).resolves.toBeDefined();
+  });
+});
+
+describe('patchDatalayer (hardening)', () => {
+  it('flushes deferred pushes in FIFO order', async () => {
+    const dl = [];
+    patchDatalayer(dl);
+    for (let i = 0; i < 5; i += 1) {
+      dl.push({ event: `e${i}` });
+    }
+    await vi.waitFor(() => {
+      expect(dl.map((e) => e.event)).toEqual(['e0', 'e1', 'e2', 'e3', 'e4']);
+    });
+  });
+
+  it('survives a tag manager replacing push after patching', async () => {
+    const dl = [];
+    patchDatalayer(dl);
+    // Simulate GTM loading and installing its own push
+    const gtmEvents = [];
+    dl.push = (...args) => gtmEvents.push(...args);
+    dl.push({ event: 'after-gtm' });
+    await vi.waitFor(() => {
+      expect(gtmEvents).toEqual([{ event: 'after-gtm' }]);
+    });
+  });
+});
+
+// Keep this block last: patchEventListeners proxies window/document listeners
+// for the rest of the environment's lifetime.
+describe('patchEventListeners (hardening)', () => {
+  it('defers unattributable-to-first-party listeners but still runs them', async () => {
+    patchEventListeners(['click']);
+    const calls = [];
+    const listener = function listener(event) {
+      calls.push({ type: event.type, self: this });
+    };
+    document.addEventListener('click', listener);
+    document.dispatchEvent(new Event('click'));
+    // Deferred: not called synchronously
+    expect(calls).toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(calls).toHaveLength(1);
+    });
+    expect(calls[0].type).toBe('click');
+    document.removeEventListener('click', listener);
+  });
+
+  it('removeEventListener removes a patched listener', async () => {
+    const listener = vi.fn();
+    document.addEventListener('click', listener);
+    document.removeEventListener('click', listener);
+    document.dispatchEvent(new Event('click'));
+    await new Promise((resolve) => { setTimeout(resolve, 150); });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('leaves non-matching event types untouched (synchronous)', () => {
+    const listener = vi.fn();
+    document.addEventListener('keydown', listener);
+    document.dispatchEvent(new Event('keydown'));
+    expect(listener).toHaveBeenCalledTimes(1);
+    document.removeEventListener('keydown', listener);
+  });
+
+  it('warns when a deferred listener calls preventDefault too late', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const listener = (event) => event.preventDefault();
+    document.addEventListener('click', listener);
+    document.dispatchEvent(new Event('click', { cancelable: true }));
+    await vi.waitFor(() => {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('preventDefault'));
+    });
+    document.removeEventListener('click', listener);
+    warn.mockRestore();
   });
 });
